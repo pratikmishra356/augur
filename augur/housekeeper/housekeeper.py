@@ -1,13 +1,17 @@
 """
 Keeps data up to date
 """
-import logging, os, time, requests
+import logging, os, time, requests, logging
 from multiprocessing import Process
 from sqlalchemy.ext.automap import automap_base
 import sqlalchemy as s
 import pandas as pd
 from sqlalchemy import MetaData
-logging.basicConfig(filename='housekeeper.log')
+from augur.logging import create_job_logger
+import warnings
+warnings.filterwarnings('ignore')
+
+logger = logging.getLogger("augur")
 
 class Housekeeper:
 
@@ -20,12 +24,12 @@ class Housekeeper:
             user, password, host, port, dbname
         )
 
-        dbschema='augur_data'
+        dbschema = 'augur_data'
         self.db = s.create_engine(DB_STR, poolclass=s.pool.NullPool,
             connect_args={'options': '-csearch_path={}'.format(dbschema)})
 
         helper_schema = 'augur_operations'
-        self.helper_db = s.create_engine(DB_STR, poolclass = s.pool.NullPool,
+        self.helper_db = s.create_engine(DB_STR, poolclass=s.pool.NullPool,
             connect_args={'options': '-csearch_path={}'.format(helper_schema)})
 
         helper_metadata = MetaData()
@@ -57,70 +61,72 @@ class Housekeeper:
         :param delay: time needed to update
         :param shared: shared object that is to also be updated
         """
-        
+        logger = create_job_logger(job["model"])
         if 'repo_group_id' in job:
             repo_group_id = job['repo_group_id']
-            logging.info('Housekeeper spawned {} model updater process for repo group id {} with PID {}\n'.format(job['model'], repo_group_id, os.getpid()))
+            logger.info('Housekeeper spawned {} model updater process for repo group id {} with PID {}\n'.format(job['model'], repo_group_id, os.getpid()))
         else:
             repo_group_id = None
-            logging.info('Housekeeper spawned {} model updater process for repo ids {} with PID {}\n'.format(job['model'], job['repo_ids'], os.getpid()))
+            logger.info('Housekeeper spawned {} model updater process for repo ids {} with PID {}\n'.format(job['model'], job['repo_ids'], os.getpid()))
 
         try:
             compatible_worker_found = False
             # Waiting for compatible worker
             while True:
                 if not compatible_worker_found:
-                    # logging.info(list(broker._getvalue().keys()))
                     for worker in list(broker._getvalue().keys()):
                         if job['model'] in broker[worker]['models'] and job['given'] in broker[worker]['given']:
                             compatible_worker_found = True
-                if compatible_worker_found:
-                    logging.info("Housekeeper recognized that the broker has a worker that " + 
-                        "can handle the {} model... beginning to distribute maintained tasks\n".format(job['model']))
-                    while True:
-                        logging.info('Housekeeper updating {} model with given {}...\n'.format(
-                            job['model'], job['given'][0]))
-                        
-                        if job['given'][0] == 'git_url' or job['given'][0] == 'github_url':
-                            for repo in job['repos']:
-                                if job['given'][0] == 'github_url' and 'github.com' not in repo['repo_git']:
-                                    continue
-                                given_key = 'git_url' if job['given'][0] == 'git_url' else 'github_url'
-                                task = {
-                                    "job_type": job['job_type'] if 'job_type' in job else 'MAINTAIN', 
-                                    "models": [job['model']], 
-                                    "display_name": "{} model for url: {}".format(job['model'], repo['repo_git']),
-                                    "given": {}
-                                }
-                                task['given'][given_key] = repo['repo_git']
-                                if "focused_task" in repo:
-                                    task["focused_task"] = repo['focused_task']
-                                try:
-                                    requests.post('http://{}:{}/api/unstable/task'.format(
-                                        broker_host,broker_port), json=task, timeout=10)
-                                except Exception as e:
-                                    logging.info("Error encountered: {}\n".format(e))
+                    time.sleep(3)
+                    continue
 
-                                time.sleep(15)
-                        elif job['given'][0] == 'repo_group':
+                logger.info("Housekeeper recognized that the broker has a worker that " + 
+                    "can handle the {} model... beginning to distribute maintained tasks\n".format(job['model']))
+                while True:
+                    logger.info('Housekeeper updating {} model with given {}...\n'.format(
+                        job['model'], job['given'][0]))
+                    
+                    if job['given'][0] == 'git_url' or job['given'][0] == 'github_url':
+                        for repo in job['repos']:
+                            if job['given'][0] == 'github_url' and 'github.com' not in repo['repo_git']:
+                                continue
+                            given_key = 'git_url' if job['given'][0] == 'git_url' else 'github_url'
                             task = {
-                                    "job_type": job['job_type'] if 'job_type' in job else 'MAINTAIN', 
-                                    "models": [job['model']], 
-                                    "display_name": "{} model for repo group id: {}".format(job['model'], repo_group_id),
-                                    "given": {
-                                        "repo_group": job['repos']
-                                    }
-                                }
+                                "job_type": job['job_type'] if 'job_type' in job else 'MAINTAIN', 
+                                "models": [job['model']], 
+                                "display_name": "{} model for url: {}".format(job['model'], repo['repo_git']),
+                                "given": {}
+                            }
+                            task['given'][given_key] = repo['repo_git']
+                            if "focused_task" in repo:
+                                task["focused_task"] = repo['focused_task']
                             try:
                                 requests.post('http://{}:{}/api/unstable/task'.format(
                                     broker_host,broker_port), json=task, timeout=10)
                             except Exception as e:
-                                logging.info("Error encountered: {}\n".format(e))
+                                logger.info("Error encountered: {}\n".format(e))
 
-                        logging.info("Housekeeper finished sending {} tasks to the broker for it to distribute to your worker(s)\n".format(len(job['repos'])))
-                        time.sleep(job['delay'])
-                    break
-                time.sleep(3)
+                            logger.info(task)
+
+                            time.sleep(15)
+
+                    elif job['given'][0] == 'repo_group':
+                        task = {
+                                "job_type": job['job_type'] if 'job_type' in job else 'MAINTAIN', 
+                                "models": [job['model']], 
+                                "display_name": "{} model for repo group id: {}".format(job['model'], repo_group_id),
+                                "given": {
+                                    "repo_group": job['repos']
+                                }
+                            }
+                        try:
+                            requests.post('http://{}:{}/api/unstable/task'.format(
+                                broker_host,broker_port), json=task, timeout=10)
+                        except Exception as e:
+                            logger.info("Error encountered: {}\n".format(e))
+
+                    logger.info("Housekeeper finished sending {} tasks to the broker for it to distribute to your worker(s)\n".format(len(job['repos'])))
+                    time.sleep(job['delay'])
                 
         except KeyboardInterrupt:
             os.kill(os.getpid(), 9)
@@ -132,7 +138,7 @@ class Housekeeper:
         """
         Starts update processes
         """
-        logging.info("Starting update processes...")
+        logger.info("Starting update processes...")
         if jobs is None:
             jobs = self.__updatable
         for job in jobs:
@@ -152,7 +158,7 @@ class Housekeeper:
         Schedules updates
         """
         # don't use this, 
-        logging.debug('Scheduling updates...')
+        logger.debug('Scheduling updates...')
         self.__updater()
 
     def join_updates(self):
@@ -257,11 +263,17 @@ class Housekeeper:
                         ORDER BY ratio_abs NULLS FIRST
                     """.format(where_condition)) if job['model'] == 'issues' and 'repo_group_id' in job else s.sql.text(""" 
                         SELECT repo_git, repo_id FROM repo {} ORDER BY repo_id ASC
-                    """.format(where_condition))
+                    """.format(where_condition)) if 'order' not in job else s.sql.text(""" 
+                        SELECT repo_git, repo.repo_id, count(*) as commit_count 
+                        FROM augur_data.repo left outer join augur_data.commits 
+                            on repo.repo_id = commits.repo_id 
+                        {}
+                        group by repo.repo_id ORDER BY commit_count {}
+                    """.format(where_condition, job['order']))
                 
                 reorganized_repos = pd.read_sql(repo_url_sql, self.db, params={})
                 if len(reorganized_repos) == 0:
-                    logging.info("Trying to send tasks for repo group, but the repo group does not contain any repos: {}".format(repoUrlSQL))
+                    logger.info("Trying to send tasks for repo group, but the repo group does not contain any repos: {}".format(repo_url_sql))
                     job['repos'] = []
                     continue
 
@@ -282,7 +294,7 @@ class Housekeeper:
                             'oauth_id': 0
                         }
                         result = self.helper_db.execute(self.job_table.insert().values(job_tuple))
-                        logging.info("No job tuple for {} model was found, so one was inserted into the job table: {}".format(job['model'], job_tuple))
+                        logger.info("No job tuple for {} model was found, so one was inserted into the job table: {}".format(job['model'], job_tuple))
 
                     # If a last id is not recorded, start from beginning of repos 
                     #   (first id is not necessarily 0)
